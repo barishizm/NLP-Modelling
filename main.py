@@ -1,795 +1,602 @@
-# Full N-gram NLP Lab Pipeline — English Only
-# Parts A–E: Preprocessing, N-gram MLE, Smoothing, Back-off & Interpolation, Perplexity, and Plots
+"""Comprehensive n-gram language modelling lab implementation.
 
-import re
+This script follows the step-by-step lab brief:
+
+Part A  - download and preprocess a corpus, report the top tokens.
+Part B  - build unigram/bigram/trigram models and score a test sentence.
+Part C  - illustrate zero probabilities and apply Laplace smoothing.
+Part D  - implement Katz-style back-off and linear interpolation models.
+Part E  - evaluate the trigram model on a held-out test set via perplexity.
+
+Running ``python main.py`` will print the artefacts requested in the lab.
+"""
+
+from __future__ import annotations
+
 import math
-import requests
-import matplotlib.pyplot as plt
+import re
 from collections import Counter
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Sequence, Tuple
 
-# -------------------------------------
-# Common: Stopwords (simple, illustrative)
-# -------------------------------------
-stop_words = {
-    "the","and","to","of","a","in","that","it","is","was","he","for","on",
-    "are","as","with","his","they","i","at","be","this","have","from","or",
-    "one","had","by","word","but","not","s","t"
-}
+from urllib.request import urlopen
 
-# =====================================
-# PART A — Download, preprocess, top-20
-# =====================================
-url = "https://www.gutenberg.org/cache/epub/11/pg11.txt"
-response = requests.get(url, timeout=60)
-text = response.text
 
-# Lowercase
-text = text.lower()
+CORPUS_URL = "https://www.gutenberg.org/cache/epub/11/pg11.txt"
+TEST_SENTENCE = "students love learning natural language processing"
 
-# Remove punctuation and digits (keep letters and spaces)
-text = re.sub(r"[^a-z\s]", " ", text)
 
-# Tokenize
-tokens = text.split()
+def download_corpus(url: str = CORPUS_URL) -> str:
+    """Download a text corpus and return it as a Unicode string."""
 
-# Stopword removal (optional for Part A)
-tokens = [w for w in tokens if w not in stop_words]
+    with urlopen(url) as response:
+        return response.read().decode("utf-8", errors="replace")
 
-# Top-20 frequent tokens
-freq = Counter(tokens)
-top20 = freq.most_common(20)
 
-print("Top 20 tokens (stopwords removed):")
-for word, count in top20:
-    print(f"{word}: {count}")
+def preprocess(text: str) -> Tuple[List[str], str]:
+    """Lowercase, remove punctuation/digits, and tokenize the corpus.
 
-# -------------------------------------
-# Helper: reuse already-built tokens or rebuild quickly
-# -------------------------------------
-def prepare_tokens_if_needed():
-    try:
-        tokens  # noqa: F821
-        assert isinstance(tokens, list) and len(tokens) > 0 and isinstance(tokens[0], str)
-        return tokens
-    except Exception:
-        url = "https://www.gutenberg.org/cache/epub/11/pg11.txt"
-        text = requests.get(url, timeout=30).text
-        text = text.lower()
-        text = re.sub(r"[^a-z\s]", " ", text)  # keep only letters & spaces
-        toks = text.split()
-        return toks
+    Returns the cleaned token list and a brief textual explanation of the
+    preprocessing pipeline.
+    """
 
-tokens = prepare_tokens_if_needed()
+    lowered = text.lower()
+    # Keep letters and whitespace only; replace everything else with a space.
+    cleaned = re.sub(r"[^a-z\s]", " ", lowered)
+    tokens = cleaned.split()
 
-# =====================================
-# PART B — N-gram counts and MLE sentence probabilities
-# (No start/end tokens, as per the lab note)
-# =====================================
-def ngram_counts(toks, n):
-    c = Counter()
-    for i in range(len(toks) - n + 1):
-        c[tuple(toks[i:i+n])] += 1
-    return c
+    explanation = (
+        "Lowercased the corpus, stripped punctuation and digits with a regular "
+        "expression (keeping alphabetic characters and whitespace), and "
+        "tokenised on whitespace."
+    )
 
-uni_counts = ngram_counts(tokens, 1)
-bi_counts  = ngram_counts(tokens, 2)
-tri_counts = ngram_counts(tokens, 3)
+    return tokens, explanation
 
-N = sum(uni_counts.values())  # total tokens
 
-# Unigram MLE
-uni_prob = { (w,): cnt / N for (w,), cnt in uni_counts.items() }
+def ngram_counts(tokens: Sequence[str], n: int) -> Counter[Tuple[str, ...]]:
+    """Compute n-gram counts for the given order ``n``."""
 
-# Bigram MLE
-bi_prob = {}
-for (w1, w2), num in bi_counts.items():
-    denom = uni_counts.get((w1,), 0)
-    if denom > 0:
-        bi_prob[(w1, w2)] = num / denom
+    counts: Counter[Tuple[str, ...]] = Counter()
+    if len(tokens) < n:
+        return counts
+    for i in range(len(tokens) - n + 1):
+        counts[tuple(tokens[i : i + n])] += 1
+    return counts
 
-# Trigram MLE
-tri_prob = {}
-for (w1, w2, w3), num in tri_counts.items():
-    denom = bi_counts.get((w1, w2), 0)
-    if denom > 0:
-        tri_prob[(w1, w2, w3)] = num / denom
 
-def clean_sentence(s):
-    s = s.lower()
-    s = re.sub(r"[^a-z\s]", " ", s)
-    return s.split()
+def unigram_probabilities(unigram_counts: Counter[Tuple[str, ...]]) -> Dict[str, float]:
+    total = sum(unigram_counts.values())
+    return {word: count / total for (word,), count in unigram_counts.items()}
 
-def sent_prob_unigram(sent_toks):
-    p = 1.0
-    logp = 0.0
-    steps = []
-    for w in sent_toks:
-        pr = uni_prob.get((w,), 0.0)
-        steps.append((w, pr))
-        if pr == 0.0:
+
+def bigram_probabilities(
+    bigram_counts: Counter[Tuple[str, str]],
+    unigram_counts: Counter[Tuple[str, ...]],
+) -> Dict[Tuple[str, str], float]:
+    probs: Dict[Tuple[str, str], float] = {}
+    for (w1, w2), count in bigram_counts.items():
+        denom = unigram_counts.get((w1,), 0)
+        if denom:
+            probs[(w1, w2)] = count / denom
+    return probs
+
+
+def trigram_probabilities(
+    trigram_counts: Counter[Tuple[str, str, str]],
+    bigram_counts: Counter[Tuple[str, str]],
+) -> Dict[Tuple[str, str, str], float]:
+    probs: Dict[Tuple[str, str, str], float] = {}
+    for (w1, w2, w3), count in trigram_counts.items():
+        denom = bigram_counts.get((w1, w2), 0)
+        if denom:
+            probs[(w1, w2, w3)] = count / denom
+    return probs
+
+
+def sentence_probability_unigram(
+    tokens: Sequence[str], uni_probs: Dict[str, float]
+) -> Tuple[float, float, List[Tuple[str, float]]]:
+    steps: List[Tuple[str, float]] = []
+    prob = 1.0
+    log_prob = 0.0
+    for word in tokens:
+        p = uni_probs.get(word, 0.0)
+        steps.append((word, p))
+        if p == 0.0:
             return 0.0, float("-inf"), steps
-        p *= pr
-        logp += math.log(pr)
-    return p, logp, steps
+        prob *= p
+        log_prob += math.log(p)
+    return prob, log_prob, steps
 
-def sent_prob_bigram(sent_toks):
-    if len(sent_toks) < 2:
-        return 1.0, 0.0, []
-    p = 1.0
-    logp = 0.0
-    steps = []
-    for i in range(len(sent_toks) - 1):
-        w1, w2 = sent_toks[i], sent_toks[i+1]
-        num = bi_counts.get((w1, w2), 0)
-        denom = uni_counts.get((w1,), 0)
-        pr = (num / denom) if denom > 0 and num > 0 else 0.0
-        steps.append(((w1, w2), pr))
-        if pr == 0.0:
+
+def sentence_probability_bigram(
+    tokens: Sequence[str],
+    bi_probs: Dict[Tuple[str, str], float],
+    unigram_counts: Counter[Tuple[str, ...]],
+) -> Tuple[float, float, List[Tuple[Tuple[str, str], float]]]:
+    steps: List[Tuple[Tuple[str, str], float]] = []
+    if len(tokens) < 2:
+        return 1.0, 0.0, steps
+    prob = 1.0
+    log_prob = 0.0
+    for i in range(len(tokens) - 1):
+        w1, w2 = tokens[i], tokens[i + 1]
+        p = bi_probs.get((w1, w2), 0.0)
+        steps.append(((w1, w2), p))
+        if p == 0.0:
             return 0.0, float("-inf"), steps
-        p *= pr
-        logp += math.log(pr)
-    return p, logp, steps
+        prob *= p
+        log_prob += math.log(p)
+    return prob, log_prob, steps
 
-def sent_prob_trigram(sent_toks):
-    if len(sent_toks) < 3:
-        return 1.0, 0.0, []
-    p = 1.0
-    logp = 0.0
-    steps = []
-    for i in range(len(sent_toks) - 2):
-        w1, w2, w3 = sent_toks[i], sent_toks[i+1], sent_toks[i+2]
-        num = tri_counts.get((w1, w2, w3), 0)
-        denom = bi_counts.get((w1, w2), 0)
-        pr = (num / denom) if denom > 0 and num > 0 else 0.0
-        steps.append(((w1, w2, w3), pr))
-        if pr == 0.0:
+
+def sentence_probability_trigram(
+    tokens: Sequence[str],
+    tri_probs: Dict[Tuple[str, str, str], float],
+) -> Tuple[float, float, List[Tuple[Tuple[str, str, str], float]]]:
+    steps: List[Tuple[Tuple[str, str, str], float]] = []
+    if len(tokens) < 3:
+        return 1.0, 0.0, steps
+    prob = 1.0
+    log_prob = 0.0
+    for i in range(len(tokens) - 2):
+        w1, w2, w3 = tokens[i], tokens[i + 1], tokens[i + 2]
+        p = tri_probs.get((w1, w2, w3), 0.0)
+        steps.append(((w1, w2, w3), p))
+        if p == 0.0:
             return 0.0, float("-inf"), steps
-        p *= pr
-        logp += math.log(pr)
-    return p, logp, steps
+        prob *= p
+        log_prob += math.log(p)
+    return prob, log_prob, steps
 
-# Test sentence for Part B
-test_sentence = "students love learning natural language processing"
-stoks = clean_sentence(test_sentence)
 
-u_p, u_logp, u_steps = sent_prob_unigram(stoks)
-b_p, b_logp, b_steps = sent_prob_bigram(stoks)
-t_p, t_logp, t_steps = sent_prob_trigram(stoks)
-
-print("Sentence tokens:", stoks, "\n")
-print("=== UNIGRAM ===")
-for w, pr in u_steps:
-    print(f"P({w}) = {pr:.6g}")
-print(f"Sentence P_unigram = {u_p:.6e} ; log = {u_logp:.6f}\n")
-
-print("=== BIGRAM ===")
-for (w1, w2), pr in b_steps:
-    print(f"P({w2} | {w1}) = {pr:.6g}")
-print(f"Sentence P_bigram = {b_p:.6e} ; log = {b_logp:.6f}\n")
-
-print("=== TRIGRAM ===")
-for (w1, w2, w3), pr in t_steps:
-    print(f"P({w3} | {w1}, {w2}) = {pr:.6g}")
-print(f"Sentence P_trigram = {t_p:.6e} ; log = {t_logp:.6f}\n")
-
-# =======================================================
-# PART C — Sparsity & Smoothing (UNK mapping + Add-1)
-# =======================================================
-def prepare_tokens_if_needed():
-    try:
-        tokens  # noqa
-        assert isinstance(tokens, list) and len(tokens) > 0
-        return tokens
-    except Exception:
-        url = "https://www.gutenberg.org/cache/epub/11/pg11.txt"
-        text = requests.get(url, timeout=30).text.lower()
-        text = re.sub(r"[^a-z\s]", " ", text)
-        return text.split()
-
-tokens = prepare_tokens_if_needed()
-
-def ngram_counts(toks, n):
-    c = Counter()
-    for i in range(len(toks)-n+1):
-        c[tuple(toks[i:i+n])] += 1
-    return c
-
-# Raw counts without UNK (MLE helpers)
-uni_c_raw = ngram_counts(tokens, 1)
-bi_c_raw  = ngram_counts(tokens, 2)
-tri_c_raw = ngram_counts(tokens, 3)
-
-def mle_bigram_prob(w1, w2):
-    num = bi_c_raw.get((w1, w2), 0)
-    den = uni_c_raw.get((w1,), 0)
-    return (num/den) if den > 0 and num > 0 else 0.0
-
-def mle_trigram_prob(w1, w2, w3):
-    num = tri_c_raw.get((w1, w2, w3), 0)
-    den = bi_c_raw.get((w1, w2), 0)
-    return (num/den) if den > 0 and num > 0 else 0.0
-
-# Build vocabulary with UNK
-def build_vocab(toks, min_freq=2):
-    cnt = Counter(toks)
-    vocab = {w for w, f in cnt.items() if f >= min_freq}
+def build_vocab(tokens: Iterable[str], min_freq: int = 2) -> set[str]:
+    counts = Counter(tokens)
+    vocab = {token for token, freq in counts.items() if freq >= min_freq}
     vocab.add("<unk>")
     return vocab
 
-def map_to_unk(toks, vocab):
-    return [w if w in vocab else "<unk>" for w in toks]
 
-vocab = build_vocab(tokens, min_freq=2)
-tok_unk = map_to_unk(tokens, vocab)
-V = len(vocab)
+def map_to_vocab(tokens: Iterable[str], vocab: set[str]) -> List[str]:
+    return [token if token in vocab else "<unk>" for token in tokens]
 
-uni_c = ngram_counts(tok_unk, 1)
-bi_c  = ngram_counts(tok_unk, 2)
-tri_c = ngram_counts(tok_unk, 3)
-N = sum(uni_c.values())
 
-# Laplace (add-1) smoothed probabilities
-def laplace_uni(w):
-    return (uni_c.get((w,), 0) + 1) / (N + V)
+def laplace_unigram_prob(
+    token: str,
+    unigram_counts: Counter[Tuple[str, ...]],
+    total_tokens: int,
+    vocab_size: int,
+) -> float:
+    return (unigram_counts.get((token,), 0) + 1) / (total_tokens + vocab_size)
 
-def laplace_bi(w1, w2):
-    return (bi_c.get((w1, w2), 0) + 1) / (uni_c.get((w1,), 0) + V)
 
-def laplace_tri(w1, w2, w3):
-    return (tri_c.get((w1, w2, w3), 0) + 1) / (bi_c.get((w1, w2), 0) + V)
+def laplace_bigram_prob(
+    w1: str,
+    w2: str,
+    bigram_counts: Counter[Tuple[str, str]],
+    unigram_counts: Counter[Tuple[str, ...]],
+    vocab_size: int,
+) -> float:
+    return (bigram_counts.get((w1, w2), 0) + 1) / (unigram_counts.get((w1,), 0) + vocab_size)
 
-def norm(w):  # map OOV test tokens to <unk>
-    return w if w in vocab else "<unk>"
 
-# Choose n-grams for before/after reporting
-test_sentence = "students love learning natural language processing"
-stoks = re.sub(r"[^a-z\s]", " ", test_sentence.lower()).split()
+def laplace_trigram_prob(
+    w1: str,
+    w2: str,
+    w3: str,
+    trigram_counts: Counter[Tuple[str, str, str]],
+    bigram_counts: Counter[Tuple[str, str]],
+    vocab_size: int,
+) -> float:
+    return (trigram_counts.get((w1, w2, w3), 0) + 1) / (bigram_counts.get((w1, w2), 0) + vocab_size)
 
-bigram_tests = []
-trigram_tests = []
-# from the sentence
-for i in range(len(stoks)-1):
-    bigram_tests.append((stoks[i], stoks[i+1]))
-for i in range(len(stoks)-2):
-    trigram_tests.append((stoks[i], stoks[i+1], stoks[i+2]))
-# extra (likely unseen)
-bigram_tests += [("quantum", "cat"), ("alice", "students")]
-trigram_tests += [("tea", "party", "students"), ("white", "rabbit", "nlp")]
 
-print("Vocabulary size (with <unk>):", V)
-print("Example OOV mapping for test tokens:",
-      [f"{w}->{norm(w)}" for w in stoks], "\n")
+def find_zero_probability_examples(
+    sentence_tokens: Sequence[str],
+    bigram_counts: Counter[Tuple[str, str]],
+    trigram_counts: Counter[Tuple[str, str, str]],
+) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str, str]]]:
+    bigram_examples: List[Tuple[str, str]] = []
+    trigram_examples: List[Tuple[str, str, str]] = []
 
-print("=== BIGRAMS: BEFORE (MLE) vs AFTER (Laplace) ===")
-shown_bi = 0
-for w1, w2 in bigram_tests:
-    p_before = mle_bigram_prob(w1, w2)
-    p_after  = laplace_bi(norm(w1), norm(w2))
-    if p_before == 0.0:  # report zero-probability examples
-        pair = f"({w1}, {w2})"
-        print(f"{pair:>30} | before={p_before:.0f}   after={p_after:.6g}")
-        shown_bi += 1
-    if shown_bi >= 2:
-        break
-if shown_bi == 0:
-    print("Note: Did not find zero-probability bigrams (rare).")
+    for i in range(len(sentence_tokens) - 1):
+        pair = (sentence_tokens[i], sentence_tokens[i + 1])
+        if bigram_counts.get(pair, 0) == 0 and pair not in bigram_examples:
+            bigram_examples.append(pair)
+        if len(bigram_examples) >= 2:
+            break
 
-print("\n=== TRIGRAMS: BEFORE (MLE) vs AFTER (Laplace) ===")
-shown_tri = 0
-for w1, w2, w3 in trigram_tests:
-    p_before = mle_trigram_prob(w1, w2, w3)
-    p_after  = laplace_tri(norm(w1), norm(w2), norm(w3))
-    if p_before == 0.0:
-        tri = f"({w1}, {w2}, {w3})"
-        print(f"{tri:>40} | before={p_before:.0f}   after={p_after:.6g}")
-        shown_tri += 1
-    if shown_tri >= 2:
-        break
-if shown_tri == 0:
-    print("Note: Did not find zero-probability trigrams (rare).")
+    for i in range(len(sentence_tokens) - 2):
+        triple = (sentence_tokens[i], sentence_tokens[i + 1], sentence_tokens[i + 2])
+        if trigram_counts.get(triple, 0) == 0 and triple not in trigram_examples:
+            trigram_examples.append(triple)
+        if len(trigram_examples) >= 2:
+            break
 
-# =======================================================
-# PART D — Back-off and Linear Interpolation
-# (using Laplace-smoothed probabilities with UNK mapping)
-# =======================================================
-def backoff_prob(sent_tokens):
-    lp = 0.0
-    steps = []
-    for i in range(len(sent_tokens) - 2):
-        w1, w2, w3 = map(norm, sent_tokens[i:i + 3])
+    return bigram_examples, trigram_examples
 
-        # If trigram count > 0, use trigram; else if bigram > 0, use bigram; else use unigram
-        tri_p = tri_c.get((w1, w2, w3), 0)
-        if tri_p > 0:
-            p = laplace_tri(w1, w2, w3)
-            src = "trigram"
+
+def normalise_tokens(tokens: Iterable[str], vocab: set[str]) -> List[str]:
+    return [token if token in vocab else "<unk>" for token in tokens]
+
+
+def backoff_sentence_logprob(
+    sentence_tokens: Sequence[str],
+    vocab: set[str],
+    unigram_counts: Counter[Tuple[str, ...]],
+    bigram_counts: Counter[Tuple[str, str]],
+    trigram_counts: Counter[Tuple[str, str, str]],
+    total_tokens: int,
+    vocab_size: int,
+) -> Tuple[float, List[Tuple[Tuple[str, str, str], float, str]]]:
+    steps: List[Tuple[Tuple[str, str, str], float, str]] = []
+    sentence = normalise_tokens(sentence_tokens, vocab)
+    log_prob = 0.0
+
+    for i in range(len(sentence) - 2):
+        w1, w2, w3 = sentence[i], sentence[i + 1], sentence[i + 2]
+        if trigram_counts.get((w1, w2, w3), 0) > 0:
+            p = laplace_trigram_prob(w1, w2, w3, trigram_counts, bigram_counts, vocab_size)
+            source = "trigram"
+        elif bigram_counts.get((w2, w3), 0) > 0:
+            p = laplace_bigram_prob(w2, w3, bigram_counts, unigram_counts, vocab_size)
+            source = "bigram"
         else:
-            bi_p = bi_c.get((w2, w3), 0)
-            if bi_p > 0:
-                p = laplace_bi(w2, w3)
-                src = "bigram"
-            else:
-                p = laplace_uni(w3)
-                src = "unigram"
-        lp += math.log(p)
-        steps.append(((w1, w2, w3), p, src))
-    return lp, steps
+            p = laplace_unigram_prob(w3, unigram_counts, total_tokens, vocab_size)
+            source = "unigram"
+        log_prob += math.log(p)
+        steps.append(((w1, w2, w3), p, source))
 
-def interpolation_prob(sent_tokens, l1=0.6, l2=0.3, l3=0.1):
-    lp = 0.0
-    steps = []
-    for i in range(len(sent_tokens) - 2):
-        w1, w2, w3 = map(norm, sent_tokens[i:i + 3])
-        p_tri = laplace_tri(w1, w2, w3)
-        p_bi  = laplace_bi(w2, w3)
-        p_uni = laplace_uni(w3)
-        p = l1 * p_tri + l2 * p_bi + l3 * p_uni
-        lp += math.log(p)
+    return log_prob, steps
+
+
+def interpolation_sentence_logprob(
+    sentence_tokens: Sequence[str],
+    vocab: set[str],
+    unigram_counts: Counter[Tuple[str, ...]],
+    bigram_counts: Counter[Tuple[str, str]],
+    trigram_counts: Counter[Tuple[str, str, str]],
+    total_tokens: int,
+    vocab_size: int,
+    lambdas: Tuple[float, float, float] = (0.6, 0.3, 0.1),
+) -> Tuple[float, List[Tuple[Tuple[str, str, str], float, Tuple[float, float, float]]]]:
+    sentence = normalise_tokens(sentence_tokens, vocab)
+    steps: List[Tuple[Tuple[str, str, str], float, Tuple[float, float, float]]] = []
+    log_prob = 0.0
+
+    for i in range(len(sentence) - 2):
+        w1, w2, w3 = sentence[i], sentence[i + 1], sentence[i + 2]
+        p_tri = laplace_trigram_prob(w1, w2, w3, trigram_counts, bigram_counts, vocab_size)
+        p_bi = laplace_bigram_prob(w2, w3, bigram_counts, unigram_counts, vocab_size)
+        p_uni = laplace_unigram_prob(w3, unigram_counts, total_tokens, vocab_size)
+        p = lambdas[0] * p_tri + lambdas[1] * p_bi + lambdas[2] * p_uni
+        log_prob += math.log(p)
         steps.append(((w1, w2, w3), p, (p_tri, p_bi, p_uni)))
-    return lp, steps
 
-test_sentences = [
-    "students love learning natural language processing",
-    "alice was beginning to get very tired",
-    "the white rabbit was late"
-]
+    return log_prob, steps
 
-for s in test_sentences:
-    stoks = re.sub(r"[^a-z\s]", " ", s.lower()).split()
-    print("\nSentence:", s)
 
-    bo_lp, bo_steps = backoff_prob(stoks)
-    it_lp, it_steps = interpolation_prob(stoks)
-
-    print(" Back-off logP:", bo_lp)
-    for (w1, w2, w3), p, src in bo_steps:
-        print(f"   {w1, w2, w3} -> {src}, p={p:.6g}")
-
-    print(" Interpolation logP:", it_lp)
-    for (w1, w2, w3), p, (pt, pb, pu) in it_steps:
-        print(f"   {w1, w2, w3} -> mix, p={p:.6g} (tri={pt:.6g}, bi={pb:.6g}, uni={pu:.6g})")
-
-# =====================================
-# PART E — Perplexity (train/test split)
-# =====================================
-def prepare_tokens_if_needed():
-    try:
-        tokens  # noqa
-        assert isinstance(tokens, list) and len(tokens) > 0
-        return tokens
-    except Exception:
-        url = "https://www.gutenberg.org/cache/epub/11/pg11.txt"
-        text = requests.get(url, timeout=30).text.lower()
-        text = re.sub(r"[^a-z\s]", " ", text)
-        return text.split()
-
-tokens_all = prepare_tokens_if_needed()
-
-# Train / test split
-split = int(0.8 * len(tokens_all))
-train_tokens_raw = tokens_all[:split]
-test_tokens_raw  = tokens_all[split:]
-
-# Vocabulary from train, then map train/test to UNK
-def build_vocab(toks, min_freq=2):
-    cnt = Counter(toks)
-    vocab = {w for w, f in cnt.items() if f >= min_freq}
-    vocab.add("<unk>")
-    return vocab
-
-def map_to_unk(toks, vocab):
-    return [w if w in vocab else "<unk>" for w in toks]
-
-vocab = build_vocab(train_tokens_raw, min_freq=2)
-train_tokens = map_to_unk(train_tokens_raw, vocab)
-test_tokens  = map_to_unk(test_tokens_raw,  vocab)
-V = len(vocab)
-
-# N-gram counts on train
-def ngram_counts(toks, n):
-    c = Counter()
-    for i in range(len(toks)-n+1):
-        c[tuple(toks[i:i+n])] += 1
-    return c
-
-uni_c = ngram_counts(train_tokens, 1)
-bi_c  = ngram_counts(train_tokens, 2)
-tri_c = ngram_counts(train_tokens, 3)
-N = sum(uni_c.values())
-
-# Smoothed and MLE trigram helpers
-def laplace_uni(w):
-    return (uni_c.get((w,), 0) + 1) / (N + V)
-
-def laplace_bi(w1, w2):
-    return (bi_c.get((w1, w2), 0) + 1) / (uni_c.get((w1,), 0) + V)
-
-def laplace_tri(w1, w2, w3):
-    return (tri_c.get((w1, w2, w3), 0) + 1) / (bi_c.get((w1, w2), 0) + V)
-
-def mle_tri(w1, w2, w3):
-    num = tri_c.get((w1, w2, w3), 0)
-    den = bi_c.get((w1, w2), 0)
-    return (num/den) if den > 0 and num > 0 else 0.0
-
-def trigram_logprob_stream(toks, prob_fn):
-    """Compute log-probability over a token stream for trigrams."""
-    lp = 0.0
+def trigram_stream_logprob(
+    tokens: Sequence[str],
+    prob_fn,
+) -> Tuple[float, int]:
+    log_prob = 0.0
     count = 0
-    for i in range(len(toks) - 2):
-        w1, w2, w3 = toks[i], toks[i+1], toks[i+2]
+    for i in range(len(tokens) - 2):
+        w1, w2, w3 = tokens[i], tokens[i + 1], tokens[i + 2]
         p = prob_fn(w1, w2, w3)
         if p <= 0.0:
-            return float("-inf"), 0  # MLE zero -> -inf
-        lp += math.log(p)
+            return float("-inf"), 0
+        log_prob += math.log(p)
         count += 1
-    return lp, count
+    return log_prob, count
 
-def perplexity_trigram(toks, prob_fn):
-    lp, m = trigram_logprob_stream(toks, prob_fn)
-    if m == 0 or not math.isfinite(lp):
+
+def perplexity(tokens: Sequence[str], prob_fn) -> float:
+    log_prob, n_events = trigram_stream_logprob(tokens, prob_fn)
+    if n_events == 0 or not math.isfinite(log_prob):
         return float("inf")
-    avg_neg_log = - lp / m
-    return math.exp(avg_neg_log)
+    return math.exp(-log_prob / n_events)
 
-def interpolation_prob_fn(l1=0.6, l2=0.3, l3=0.1):
-    def f(w1, w2, w3):
-        return l1*laplace_tri(w1, w2, w3) + l2*laplace_bi(w2, w3) + l3*laplace_uni(w3)
-    return f
 
-pp_mle    = perplexity_trigram(test_tokens, mle_tri)  # likely inf
-pp_lap    = perplexity_trigram(test_tokens, laplace_tri)
-pp_interp = perplexity_trigram(test_tokens, interpolation_prob_fn(0.6, 0.3, 0.1))
+@dataclass
+class PartAResult:
+    tokens: List[str]
+    explanation: str
+    top_tokens: List[Tuple[str, int]]
 
-print("Vocab size (train):", V)
-print("Test token count (effective trigrams):", max(0, len(test_tokens)-2))
-print("\nPerplexity (test set):")
-print("  Trigram MLE (unsmoothed):", pp_mle)
-print("  Trigram + Laplace:", pp_lap)
-print("  Interpolation (λ=0.6/0.3/0.1):", pp_interp)
 
-# =======================================================
-# PART F — Unified pipeline with plots for A–E
-# (English-only version)
-# =======================================================
-def load_or_use_tokens():
-    try:
-        tokens  # noqa: F821
-        assert isinstance(tokens, list) and tokens and isinstance(tokens[0], str)
-        return tokens
-    except Exception:
-        url = "https://www.gutenberg.org/cache/epub/11/pg11.txt"
-        text = requests.get(url, timeout=30).text
-        text = text.lower()
-        text = re.sub(r"[^a-z\s]", " ", text)
-        return text.split()
+def part_a(text: str) -> PartAResult:
+    tokens, explanation = preprocess(text)
+    top_tokens = Counter(tokens).most_common(20)
+    return PartAResult(tokens, explanation, top_tokens)
 
-tokens_all = load_or_use_tokens()
 
-# Part A: Top-20 tokens (raw) — Plot
-cnt_all = Counter(tokens_all)
-top20 = cnt_all.most_common(20)
+@dataclass
+class PartBResult:
+    unigram_steps: List[Tuple[str, float]]
+    bigram_steps: List[Tuple[Tuple[str, str], float]]
+    trigram_steps: List[Tuple[Tuple[str, str, str], float]]
+    unigram_prob: float
+    bigram_prob: float
+    trigram_prob: float
 
-plt.figure()
-plt.bar([w for w, _ in top20], [c for _, c in top20])
-plt.xticks(rotation=70)
-plt.title("Part A — Top 20 Tokens (raw)")
-plt.ylabel("Frequency")
-plt.tight_layout()
-plt.show()
 
-# N-gram helpers shared by plots
-def ngram_counts(toks, n):
-    c = Counter()
-    for i in range(len(toks)-n+1):
-        c[tuple(toks[i:i+n])] += 1
-    return c
+def part_b(tokens: Sequence[str], sentence: str) -> PartBResult:
+    sentence_tokens = preprocess(sentence)[0]
+    uni_counts = ngram_counts(tokens, 1)
+    bi_counts = ngram_counts(tokens, 2)
+    tri_counts = ngram_counts(tokens, 3)
 
-def build_vocab(toks, min_freq=2):
-    cnt = Counter(toks)
-    vocab = {w for w, f in cnt.items() if f >= min_freq}
-    vocab.add("<unk>")
-    return vocab
+    uni_probs = unigram_probabilities(uni_counts)
+    bi_probs = bigram_probabilities(bi_counts, uni_counts)
+    tri_probs = trigram_probabilities(tri_counts, bi_counts)
 
-def map_to_unk(toks, vocab):
-    return [w if w in vocab else "<unk>" for w in toks]
+    u_prob, _, u_steps = sentence_probability_unigram(sentence_tokens, uni_probs)
+    b_prob, _, b_steps = sentence_probability_bigram(sentence_tokens, bi_probs, uni_counts)
+    t_prob, _, t_steps = sentence_probability_trigram(sentence_tokens, tri_probs)
 
-def clean_sentence_to_tokens(s):
-    s = s.lower()
-    s = re.sub(r"[^a-z\s]", " ", s)
-    return s.split()
+    return PartBResult(u_steps, b_steps, t_steps, u_prob, b_prob, t_prob)
 
-# Part B (unsmoothed) — step probabilities for a sentence
-uni_c_B = ngram_counts(tokens_all, 1)
-bi_c_B  = ngram_counts(tokens_all, 2)
-tri_c_B = ngram_counts(tokens_all, 3)
-N_B = sum(uni_c_B.values())
 
-def uni_p_mle_B(w):
-    return uni_c_B.get((w,), 0) / N_B if N_B > 0 else 0.0
+@dataclass
+class PartCResult:
+    bigram_examples: List[Tuple[str, str, float, float]]
+    trigram_examples: List[Tuple[str, str, str, float, float]]
+    vocab: set[str]
+    unigram_counts: Counter[Tuple[str, ...]]
+    bigram_counts: Counter[Tuple[str, str]]
+    trigram_counts: Counter[Tuple[str, str, str]]
+    total_tokens: int
 
-def bi_p_mle_B(w1, w2):
-    num = bi_c_B.get((w1, w2), 0)
-    den = uni_c_B.get((w1,), 0)
-    return (num/den) if den > 0 and num > 0 else 0.0
 
-def tri_p_mle_B(w1, w2, w3):
-    num = tri_c_B.get((w1, w2, w3), 0)
-    den = bi_c_B.get((w1, w2), 0)
-    return (num/den) if den > 0 and num > 0 else 0.0
+def part_c(tokens: Sequence[str], sentence: str) -> PartCResult:
+    sentence_tokens = preprocess(sentence)[0]
+    uni_counts = ngram_counts(tokens, 1)
+    bi_counts = ngram_counts(tokens, 2)
+    tri_counts = ngram_counts(tokens, 3)
 
-test_sentence = "students love learning natural language processing"
-stoks_B = clean_sentence_to_tokens(test_sentence)
+    bigram_zero, trigram_zero = find_zero_probability_examples(
+        sentence_tokens, bi_counts, tri_counts
+    )
 
-uni_steps_B = [("("+w+")", max(uni_p_mle_B(w), 0.0)) for w in stoks_B]
-bi_steps_B  = []
-for i in range(len(stoks_B)-1):
-    w1, w2 = stoks_B[i], stoks_B[i+1]
-    bi_steps_B.append((f"({w1},{w2})", max(bi_p_mle_B(w1, w2), 0.0)))
-tri_steps_B = []
-for i in range(len(stoks_B)-2):
-    w1, w2, w3 = stoks_B[i], stoks_B[i+1], stoks_B[i+2]
-    tri_steps_B.append((f"({w1},{w2},{w3})", max(tri_p_mle_B(w1, w2, w3), 0.0)))
+    vocab = build_vocab(tokens, min_freq=2)
+    mapped_tokens = map_to_vocab(tokens, vocab)
+    unigram_smoothed = ngram_counts(mapped_tokens, 1)
+    bigram_smoothed = ngram_counts(mapped_tokens, 2)
+    trigram_smoothed = ngram_counts(mapped_tokens, 3)
+    total_tokens = sum(unigram_smoothed.values())
+    vocab_size = len(vocab)
 
-def _plot_ngram_steps(title, pairs):
-    if not pairs:
-        return
-    labels = [p[0] for p in pairs]
-    vals   = [p[1] for p in pairs]
-    eps = 1e-12
-    logvals = [math.log10(v + eps) for v in vals]
-    plt.figure()
-    plt.bar(range(len(labels)), logvals)
-    plt.xticks(range(len(labels)), labels, rotation=70)
-    plt.ylabel("log10(prob + eps)")
-    plt.title(title)
-    plt.tight_layout()
-    plt.show()
+    bigram_examples: List[Tuple[str, str, float, float]] = []
+    for w1, w2 in bigram_zero:
+        before = 0.0
+        after = laplace_bigram_prob(
+            w1 if w1 in vocab else "<unk>",
+            w2 if w2 in vocab else "<unk>",
+            bigram_smoothed,
+            unigram_smoothed,
+            vocab_size,
+        )
+        bigram_examples.append((w1, w2, before, after))
 
-_plot_ngram_steps("Part B — Unigram step probs (unsmoothed)", uni_steps_B)
-_plot_ngram_steps("Part B — Bigram step probs (unsmoothed)", bi_steps_B)
-_plot_ngram_steps("Part B — Trigram step probs (unsmoothed)", tri_steps_B)
+    trigram_examples: List[Tuple[str, str, str, float, float]] = []
+    for w1, w2, w3 in trigram_zero:
+        before = 0.0
+        after = laplace_trigram_prob(
+            w1 if w1 in vocab else "<unk>",
+            w2 if w2 in vocab else "<unk>",
+            w3 if w3 in vocab else "<unk>",
+            trigram_smoothed,
+            bigram_smoothed,
+            vocab_size,
+        )
+        trigram_examples.append((w1, w2, w3, before, after))
 
-# Part C — Before (MLE) vs After (Laplace) plots on UNK-mapped data
-vocab_C = build_vocab(tokens_all, min_freq=2)
-tok_unk_C = map_to_unk(tokens_all, vocab_C)
-V_C = len(vocab_C)
+    # Ensure at least two examples by adding synthetic ones if necessary.
+    extra_bigrams = [("alice", "students"), ("quantum", "cat")]
+    for w1, w2 in extra_bigrams:
+        if len(bigram_examples) >= 2:
+            break
+        after = laplace_bigram_prob(
+            w1 if w1 in vocab else "<unk>",
+            w2 if w2 in vocab else "<unk>",
+            bigram_smoothed,
+            unigram_smoothed,
+            vocab_size,
+        )
+        bigram_examples.append((w1, w2, 0.0, after))
 
-uni_c_C = ngram_counts(tok_unk_C, 1)
-bi_c_C  = ngram_counts(tok_unk_C, 2)
-tri_c_C = ngram_counts(tok_unk_C, 3)
-N_C = sum(uni_c_C.values())
+    extra_trigrams = [("tea", "party", "students"), ("white", "rabbit", "nlp")]
+    for w1, w2, w3 in extra_trigrams:
+        if len(trigram_examples) >= 2:
+            break
+        after = laplace_trigram_prob(
+            w1 if w1 in vocab else "<unk>",
+            w2 if w2 in vocab else "<unk>",
+            w3 if w3 in vocab else "<unk>",
+            trigram_smoothed,
+            bigram_smoothed,
+            vocab_size,
+        )
+        trigram_examples.append((w1, w2, w3, 0.0, after))
 
-def laplace_uni_C(w):
-    return (uni_c_C.get((w,), 0) + 1) / (N_C + V_C)
+    return PartCResult(
+        bigram_examples,
+        trigram_examples,
+        vocab,
+        unigram_smoothed,
+        bigram_smoothed,
+        trigram_smoothed,
+        total_tokens,
+    )
 
-def laplace_bi_C(w1, w2):
-    return (bi_c_C.get((w1, w2), 0) + 1) / (uni_c_C.get((w1,), 0) + V_C)
 
-def laplace_tri_C(w1, w2, w3):
-    return (tri_c_C.get((w1, w2, w3), 0) + 1) / (bi_c_C.get((w1, w2), 0) + V_C)
+@dataclass
+class PartDResult:
+    sentences: List[str]
+    backoff: List[Tuple[float, List[Tuple[Tuple[str, str, str], float, str]]]]
+    interpolation: List[
+        Tuple[float, List[Tuple[Tuple[str, str, str], float, Tuple[float, float, float]]]]
+    ]
 
-def norm_C(w):
-    return w if w in vocab_C else "<unk>"
 
-# pick some n-grams (likely unseen)
-bigram_tests = []
-trigram_tests = []
-for i in range(len(stoks_B)-1):
-    bigram_tests.append((stoks_B[i], stoks_B[i+1]))
-for i in range(len(stoks_B)-2):
-    trigram_tests.append((stoks_B[i], stoks_B[i+1], stoks_B[i+2]))
-bigram_tests += [("quantum", "cat"), ("alice", "students")]
-trigram_tests += [("tea", "party", "students"), ("white", "rabbit", "nlp")]
+def part_d(part_c: PartCResult, sentences: Sequence[str]) -> PartDResult:
+    vocab = part_c.vocab
+    unigram_counts = part_c.unigram_counts
+    bigram_counts = part_c.bigram_counts
+    trigram_counts = part_c.trigram_counts
+    total_tokens = part_c.total_tokens
+    vocab_size = len(vocab)
 
-def bi_p_mle_C(w1, w2):
-    num = bi_c_B.get((w1, w2), 0)
-    den = uni_c_B.get((w1,), 0)
-    return (num/den) if den > 0 and num > 0 else 0.0
+    backoff_results: List[Tuple[float, List[Tuple[Tuple[str, str, str], float, str]]]] = []
+    interpolation_results: List[
+        Tuple[float, List[Tuple[Tuple[str, str, str], float, Tuple[float, float, float]]]]
+    ] = []
 
-def tri_p_mle_C(w1, w2, w3):
-    num = tri_c_B.get((w1, w2, w3), 0)
-    den = bi_c_B.get((w1, w2), 0)
-    return (num/den) if den > 0 and num > 0 else 0.0
+    for sentence in sentences:
+        sent_tokens = preprocess(sentence)[0]
+        bo_log_prob, bo_steps = backoff_sentence_logprob(
+            sent_tokens,
+            vocab,
+            unigram_counts,
+            bigram_counts,
+            trigram_counts,
+            total_tokens,
+            vocab_size,
+        )
+        it_log_prob, it_steps = interpolation_sentence_logprob(
+            sent_tokens,
+            vocab,
+            unigram_counts,
+            bigram_counts,
+            trigram_counts,
+            total_tokens,
+            vocab_size,
+        )
+        backoff_results.append((bo_log_prob, bo_steps))
+        interpolation_results.append((it_log_prob, it_steps))
 
-def plot_before_after_bigrams():
-    labels, before, after = [], [], []
-    shown = 0
-    for w1, w2 in bigram_tests:
-        pb = bi_p_mle_C(w1, w2)
-        pa = laplace_bi_C(norm_C(w1), norm_C(w2))
-        if pb == 0.0 and shown < 5:
-            labels.append(f"({w1},{w2})")
-            before.append(0.0)
-            after.append(pa)
-            shown += 1
-    if labels:
-        plt.figure()
-        x = range(len(labels))
-        plt.bar([i-0.2 for i in x], before, width=0.4, label="Before (MLE)")
-        plt.bar([i+0.2 for i in x], after, width=0.4, label="After (Laplace)")
-        plt.xticks(x, labels, rotation=60)
-        plt.ylabel("Probability")
-        plt.title("Part C — Bigram: Before vs After")
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
+    return PartDResult(list(sentences), backoff_results, interpolation_results)
 
-def plot_before_after_trigrams():
-    labels, before, after = [], [], []
-    shown = 0
-    for w1, w2, w3 in trigram_tests:
-        pb = tri_p_mle_C(w1, w2, w3)
-        pa = laplace_tri_C(norm_C(w1), norm_C(w2), norm_C(w3))
-        if pb == 0.0 and shown < 5:
-            labels.append(f"({w1},{w2},{w3})")
-            before.append(0.0)
-            after.append(pa)
-            shown += 1
-    if labels:
-        plt.figure()
-        x = range(len(labels))
-        plt.bar([i-0.2 for i in x], before, width=0.4, label="Before (MLE)")
-        plt.bar([i+0.2 for i in x], after, width=0.4, label="After (Laplace)")
-        plt.xticks(x, labels, rotation=60)
-        plt.ylabel("Probability")
-        plt.title("Part C — Trigram: Before vs After")
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
 
-plot_before_after_bigrams()
-plot_before_after_trigrams()
+@dataclass
+class PartEResult:
+    perplexity_mle: float
+    perplexity_laplace: float
+    perplexity_interpolation: float
 
-# Part D — Back-off vs Interpolation plots
-def backoff_logP(sent_tokens):
-    lp = 0.0
-    for i in range(len(sent_tokens)-2):
-        w1, w2, w3 = map(norm_C, sent_tokens[i:i+3])
-        if tri_c_C.get((w1, w2, w3), 0) > 0:
-            p = laplace_tri_C(w1, w2, w3)
-        elif bi_c_C.get((w2, w3), 0) > 0:
-            p = laplace_bi_C(w2, w3)
-        else:
-            p = laplace_uni_C(w3)
-        lp += math.log(p)
-    return lp
 
-def interpolation_prob_C(w1, w2, w3, l1=0.6, l2=0.3, l3=0.1):
-    w1, w2, w3 = norm_C(w1), norm_C(w2), norm_C(w3)
-    return l1*laplace_tri_C(w1, w2, w3) + l2*laplace_bi_C(w2, w3) + l3*laplace_uni_C(w3)
+def part_e(tokens: Sequence[str], part_c: PartCResult) -> PartEResult:
+    split_idx = int(0.8 * len(tokens))
+    train_raw = tokens[:split_idx]
+    test_raw = tokens[split_idx:]
 
-def interpolation_logP(sent_tokens, l1=0.6, l2=0.3, l3=0.1):
-    lp = 0.0
-    for i in range(len(sent_tokens)-2):
-        w1, w2, w3 = sent_tokens[i:i+3]
-        lp += math.log(interpolation_prob_C(w1, w2, w3, l1, l2, l3))
-    return lp
+    vocab = build_vocab(train_raw, min_freq=2)
+    train = map_to_vocab(train_raw, vocab)
+    test = map_to_vocab(test_raw, vocab)
 
-test_sentences = [
-    "students love learning natural language processing",
-    "alice was beginning to get very tired",
-    "the white rabbit was late"
-]
+    unigram_counts = ngram_counts(train, 1)
+    bigram_counts = ngram_counts(train, 2)
+    trigram_counts = ngram_counts(train, 3)
+    total_tokens = sum(unigram_counts.values())
+    vocab_size = len(vocab)
 
-labels_D, backoff_vals, interp_vals = [], [], []
-for s in test_sentences:
-    toks = clean_sentence_to_tokens(s)
-    labels_D.append(s[:28] + ("..." if len(s) > 28 else ""))
-    backoff_vals.append(backoff_logP(toks))
-    interp_vals.append(interpolation_logP(toks))
+    def trigram_mle_prob(w1: str, w2: str, w3: str) -> float:
+        num = trigram_counts.get((w1, w2, w3), 0)
+        denom = bigram_counts.get((w1, w2), 0)
+        return (num / denom) if denom and num else 0.0
 
-plt.figure()
-x = range(len(labels_D))
-plt.bar([i-0.2 for i in x], backoff_vals, width=0.4, label="Back-off (logP)")
-plt.bar([i+0.2 for i in x], interp_vals, width=0.4, label="Interpolation (logP)")
-plt.xticks(x, labels_D, rotation=0)
-plt.ylabel("log probability (higher is better)")
-plt.title("Part D — Back-off vs Interpolation (logP)")
-plt.legend()
-plt.tight_layout()
-plt.show()
+    def trigram_laplace_prob(w1: str, w2: str, w3: str) -> float:
+        return laplace_trigram_prob(w1, w2, w3, trigram_counts, bigram_counts, vocab_size)
 
-# Part E — Perplexity across models/orders
-split = int(0.8 * len(tokens_all))
-train_raw = tokens_all[:split]
-test_raw  = tokens_all[split:]
+    def trigram_interpolation_prob(w1: str, w2: str, w3: str) -> float:
+        p_tri = trigram_laplace_prob(w1, w2, w3)
+        p_bi = laplace_bigram_prob(w2, w3, bigram_counts, unigram_counts, vocab_size)
+        p_uni = laplace_unigram_prob(w3, unigram_counts, total_tokens, vocab_size)
+        return 0.6 * p_tri + 0.3 * p_bi + 0.1 * p_uni
 
-vocab_E = build_vocab(train_raw, min_freq=2)
-train = map_to_unk(train_raw, vocab_E)
-test  = map_to_unk(test_raw,  vocab_E)
-V_E = len(vocab_E)
+    perp_mle = perplexity(test, trigram_mle_prob)
+    perp_laplace = perplexity(test, trigram_laplace_prob)
+    perp_interp = perplexity(test, trigram_interpolation_prob)
 
-uni_c_E = ngram_counts(train, 1)
-bi_c_E  = ngram_counts(train, 2)
-tri_c_E = ngram_counts(train, 3)
-N_E = sum(uni_c_E.values())
+    return PartEResult(perp_mle, perp_laplace, perp_interp)
 
-def laplace_uni_E(w):
-    return (uni_c_E.get((w,), 0) + 1) / (N_E + V_E)
 
-def laplace_bi_E(w1, w2):
-    return (bi_c_E.get((w1, w2), 0) + 1) / (uni_c_E.get((w1,), 0) + V_E)
+def main() -> None:
+    print("Downloading corpus...")
+    raw_text = download_corpus()
 
-def laplace_tri_E(w1, w2, w3):
-    return (tri_c_E.get((w1, w2, w3), 0) + 1) / (bi_c_E.get((w1, w2), 0) + V_E)
+    print("\n=== PART A: Preprocessing ===")
+    part_a_result = part_a(raw_text)
+    print(part_a_result.explanation)
+    print(f"Total tokens after cleaning: {len(part_a_result.tokens):,}")
+    print("Top 20 tokens:")
+    for token, count in part_a_result.top_tokens:
+        print(f"  {token:>15s} : {count}")
+    print("Sample of cleaned tokens:")
+    print(part_a_result.tokens[:40])
 
-def mle_uni_E(w):
-    return uni_c_E.get((w,), 0)/N_E if N_E > 0 and uni_c_E.get((w,), 0) > 0 else 0.0
+    print("\n=== PART B: Sentence Probabilities ===")
+    part_b_result = part_b(part_a_result.tokens, TEST_SENTENCE)
+    print(f"Sentence: '{TEST_SENTENCE}'")
+    print("Unigram probability steps:")
+    for token, prob in part_b_result.unigram_steps:
+        print(f"  P({token}) = {prob:.6g}")
+    print(f"Total unigram probability: {part_b_result.unigram_prob:.6e}")
 
-def mle_bi_E(w1, w2):
-    num = bi_c_E.get((w1, w2), 0)
-    den = uni_c_E.get((w1,), 0)
-    return (num/den) if den > 0 and num > 0 else 0.0
+    print("Bigram probability steps:")
+    for (w1, w2), prob in part_b_result.bigram_steps:
+        print(f"  P({w2} | {w1}) = {prob:.6g}")
+    print(f"Total bigram probability: {part_b_result.bigram_prob:.6e}")
 
-def mle_tri_E(w1, w2, w3):
-    num = tri_c_E.get((w1, w2, w3), 0)
-    den = bi_c_E.get((w1, w2), 0)
-    return (num/den) if den > 0 and num > 0 else 0.0
+    print("Trigram probability steps:")
+    for (w1, w2, w3), prob in part_b_result.trigram_steps:
+        print(f"  P({w3} | {w1}, {w2}) = {prob:.6g}")
+    print(f"Total trigram probability: {part_b_result.trigram_prob:.6e}")
 
-def perplexity_stream(toks, prob_fn, order):
-    lp = 0.0
-    m = 0
-    if order == 1:
-        for w in toks:
-            p = prob_fn(w)
-            if p <= 0.0: return float("inf")
-            lp += math.log(p); m += 1
-    elif order == 2:
-        for i in range(len(toks)-1):
-            w1, w2 = toks[i], toks[i+1]
-            p = prob_fn(w1, w2)
-            if p <= 0.0: return float("inf")
-            lp += math.log(p); m += 1
-    elif order == 3:
-        for i in range(len(toks)-2):
-            w1, w2, w3 = toks[i], toks[i+1], toks[i+2]
-            p = prob_fn(w1, w2, w3)
-            if p <= 0.0: return float("inf")
-            lp += math.log(p); m += 1
-    if m == 0: return float("inf")
-    return math.exp(-lp/m)
+    print("\n=== PART C: Handling Sparsity with Laplace Smoothing ===")
+    part_c_result = part_c(part_a_result.tokens, TEST_SENTENCE)
+    print("Zero-probability bigrams before smoothing and after Laplace:")
+    for w1, w2, before, after in part_c_result.bigram_examples[:2]:
+        print(f"  ({w1}, {w2}): before={before:.1f}, after={after:.6g}")
+    print("Zero-probability trigrams before smoothing and after Laplace:")
+    for w1, w2, w3, before, after in part_c_result.trigram_examples[:2]:
+        print(f"  ({w1}, {w2}, {w3}): before={before:.1f}, after={after:.6g}")
 
-# Interpolation (bi with uni; tri with bi+uni)
-def interp_bi_prob_E(w1, w2, l1=0.7, l2=0.3):
-    return l1*laplace_bi_E(w1, w2) + l2*laplace_uni_E(w2)
+    print("\n=== PART D: Back-off vs. Interpolation ===")
+    sentences = [
+        TEST_SENTENCE,
+        "alice was beginning to get very tired",
+        "the white rabbit was late",
+    ]
+    part_d_result = part_d(part_c_result, sentences)
+    for sent, (bo_log, bo_steps), (it_log, it_steps) in zip(
+        part_d_result.sentences,
+        part_d_result.backoff,
+        part_d_result.interpolation,
+    ):
+        print(f"Sentence: '{sent}'")
+        print(f"  Back-off log-probability: {bo_log:.6f}")
+        for context, prob, source in bo_steps:
+            print(f"    {context} -> {source:>8s}, p={prob:.6g}")
+        print(f"  Interpolation log-probability: {it_log:.6f}")
+        for context, prob, components in it_steps:
+            tri_p, bi_p, uni_p = components
+            print(
+                "    {} -> mix, p={:.6g} (tri={:.6g}, bi={:.6g}, uni={:.6g})".format(
+                    context, prob, tri_p, bi_p, uni_p
+                )
+            )
 
-def interp_tri_prob_E(w1, w2, w3, l1=0.6, l2=0.3, l3=0.1):
-    return l1*laplace_tri_E(w1, w2, w3) + l2*laplace_bi_E(w2, w3) + l3*laplace_uni_E(w3)
+    print("\n=== PART E: Trigram Perplexity on Held-out Data ===")
+    part_e_result = part_e(part_a_result.tokens, part_c_result)
+    print(f"Perplexity (MLE trigram): {part_e_result.perplexity_mle}")
+    print(f"Perplexity (Laplace trigram): {part_e_result.perplexity_laplace:.3f}")
+    print(f"Perplexity (Interpolated trigram): {part_e_result.perplexity_interpolation:.3f}")
 
-pp = {
-    "Unigram MLE":        perplexity_stream(test, mle_uni_E, 1),
-    "Unigram Laplace":    perplexity_stream(test, laplace_uni_E, 1),
-    "Bigram MLE":         perplexity_stream(test, mle_bi_E, 2),
-    "Bigram Laplace":     perplexity_stream(test, laplace_bi_E, 2),
-    "Bigram Interp":      perplexity_stream(test, lambda w1,w2: interp_bi_prob_E(w1,w2), 2),
-    "Trigram MLE":        perplexity_stream(test, mle_tri_E, 3),
-    "Trigram Laplace":    perplexity_stream(test, laplace_tri_E, 3),
-    "Trigram Interp":     perplexity_stream(test, lambda w1,w2,w3: interp_tri_prob_E(w1,w2,w3), 3),
-}
 
-labels_E = list(pp.keys())
-vals_E   = [pp[k] for k in labels_E]
+if __name__ == "__main__":
+    main()
 
-# Plot finite perplexities
-finite_pairs = [(k, v) for k, v in zip(labels_E, vals_E) if math.isfinite(v)]
-infinite     = [(k, v) for k, v in zip(labels_E, vals_E) if not math.isfinite(v)]
-
-if finite_pairs:
-    plt.figure()
-    x = range(len(finite_pairs))
-    plt.bar(x, [v for _, v in finite_pairs])
-    plt.xticks(x, [k for k, _ in finite_pairs], rotation=30, ha="right")
-    plt.ylabel("Perplexity (lower is better)")
-    plt.title("Part E — Perplexity by Model/Order")
-    plt.tight_layout()
-    plt.show()
-
-if infinite:
-    print("\n[NOTE] Infinite perplexities (zero-probability issue):")
-    for k, _ in infinite:
-        print("  -", k)
-
-print("\nPerplexity summary:")
-for k in labels_E:
-    print(f"  {k:18s}: {vals_E[labels_E.index(k)]}")
