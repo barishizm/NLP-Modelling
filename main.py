@@ -1,9 +1,14 @@
 # Full N-gram NLP Lab Pipeline — English Only
 # Parts A–E: Preprocessing, N-gram MLE, Smoothing, Back-off & Interpolation, Perplexity, and Plots
 
+import os
 import re
 import math
-import requests
+from pathlib import Path
+from typing import Optional, Union
+from urllib.error import URLError
+from urllib.request import urlopen
+
 import matplotlib.pyplot as plt
 from collections import Counter
 
@@ -19,9 +24,50 @@ stop_words = {
 # =====================================
 # PART A — Download, preprocess, top-20
 # =====================================
-url = "https://www.gutenberg.org/cache/epub/11/pg11.txt"
-response = requests.get(url, timeout=60)
-text = response.text
+DEFAULT_CORPUS_URL = "https://www.gutenberg.org/cache/epub/11/pg11.txt"
+DEFAULT_FALLBACK_PATH = Path("data/alice.txt")
+
+
+def download_corpus(
+    url: str = DEFAULT_CORPUS_URL,
+    local_override: Optional[Union[Path, str]] = None,
+) -> str:
+    """Return the raw corpus text.
+
+    When HTTPS is unavailable you can either pass a ``Path`` pointing to a local
+    copy of the corpus, or set the ``ALICE_CORPUS_PATH`` environment variable to
+    the desired file.  As a final fallback the function will try reading from
+    ``data/alice.txt`` if it exists.  If all options fail a descriptive error is
+    raised so lab runners know how to proceed.
+    """
+
+    # Allow users to provide a local file explicitly via argument or env var
+    override = local_override or os.getenv("ALICE_CORPUS_PATH")
+    if override:
+        path = Path(override)
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+        raise FileNotFoundError(
+            f"Local corpus override '{path}' was not found. Provide a valid path "
+            "or remove the override to download the default corpus."
+        )
+
+    try:
+        with urlopen(url, timeout=60) as response:
+            return response.read().decode("utf-8")
+    except URLError as exc:
+        # HTTPS may be blocked (e.g. in offline grading environments).  Try a
+        # cached copy before surfacing a friendly error.
+        if DEFAULT_FALLBACK_PATH.exists():
+            return DEFAULT_FALLBACK_PATH.read_text(encoding="utf-8")
+        raise RuntimeError(
+            "Failed to download the corpus. Provide a local file via the "
+            "'local_override' argument or set the ALICE_CORPUS_PATH environment "
+            "variable pointing to a cached copy."
+        ) from exc
+
+
+text = download_corpus()
 
 # Lowercase
 text = text.lower()
@@ -52,8 +98,7 @@ def prepare_tokens_if_needed():
         assert isinstance(tokens, list) and len(tokens) > 0 and isinstance(tokens[0], str)
         return tokens
     except Exception:
-        url = "https://www.gutenberg.org/cache/epub/11/pg11.txt"
-        text = requests.get(url, timeout=30).text
+        text = download_corpus()
         text = text.lower()
         text = re.sub(r"[^a-z\s]", " ", text)  # keep only letters & spaces
         toks = text.split()
