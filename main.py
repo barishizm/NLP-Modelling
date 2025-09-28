@@ -3,9 +3,33 @@
 
 import re
 import math
-import requests
 import matplotlib.pyplot as plt
 from collections import Counter
+from urllib.error import URLError
+from urllib.request import urlopen
+
+
+def download_corpus(url: str, timeout: int = 60) -> str:
+    """Fetch text content from the provided URL with a resilient fallback."""
+    try:
+        import requests  # type: ignore
+    except ImportError:
+        requests = None  # type: ignore
+
+    if requests is not None:  # type: ignore
+        try:
+            response = requests.get(url, timeout=timeout)  # type: ignore[attr-defined]
+            response.raise_for_status()
+            return response.text
+        except Exception:
+            pass
+
+    try:
+        with urlopen(url, timeout=timeout) as resp:
+            charset = resp.headers.get_content_charset() or "utf-8"
+            return resp.read().decode(charset, errors="replace")
+    except URLError as exc:
+        raise RuntimeError(f"Failed to download corpus from {url}") from exc
 
 # -------------------------------------
 # Common: Stopwords (simple, illustrative)
@@ -20,8 +44,7 @@ stop_words = {
 # PART A — Download, preprocess, top-20
 # =====================================
 url = "https://www.gutenberg.org/cache/epub/11/pg11.txt"
-response = requests.get(url, timeout=60)
-text = response.text
+text = download_corpus(url, timeout=60)
 
 # Lowercase
 text = text.lower()
@@ -53,7 +76,7 @@ def prepare_tokens_if_needed():
         return tokens
     except Exception:
         url = "https://www.gutenberg.org/cache/epub/11/pg11.txt"
-        text = requests.get(url, timeout=30).text
+        text = download_corpus(url, timeout=30)
         text = text.lower()
         text = re.sub(r"[^a-z\s]", " ", text)  # keep only letters & spaces
         toks = text.split()
@@ -182,7 +205,7 @@ def prepare_tokens_if_needed():
         return tokens
     except Exception:
         url = "https://www.gutenberg.org/cache/epub/11/pg11.txt"
-        text = requests.get(url, timeout=30).text.lower()
+        text = download_corpus(url, timeout=30).lower()
         text = re.sub(r"[^a-z\s]", " ", text)
         return text.split()
 
@@ -359,7 +382,7 @@ def prepare_tokens_if_needed():
         return tokens
     except Exception:
         url = "https://www.gutenberg.org/cache/epub/11/pg11.txt"
-        text = requests.get(url, timeout=30).text.lower()
+        text = download_corpus(url, timeout=30).lower()
         text = re.sub(r"[^a-z\s]", " ", text)
         return text.split()
 
@@ -459,7 +482,7 @@ def load_or_use_tokens():
         return tokens
     except Exception:
         url = "https://www.gutenberg.org/cache/epub/11/pg11.txt"
-        text = requests.get(url, timeout=30).text
+        text = download_corpus(url, timeout=30)
         text = text.lower()
         text = re.sub(r"[^a-z\s]", " ", text)
         return text.split()
